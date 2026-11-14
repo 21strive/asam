@@ -174,6 +174,7 @@ Source/
   seq/                    patterns and the preset bank
   ui/                     Rapi for JUCE: tokens, type, Lucide icons, widgets, the step grid, look and feel
 Resources/Fonts/          Geist, Geist Mono and Geist Pixel (SIL OFL 1.1)
+Resources/Icon/           the macOS app icon and the Swift script that draws it
 Tests/AsamCheck.cpp       offline checks
 ThirdParty/JUCE/          JUCE 9.0.5 (submodule)
 docs/                     screenshots

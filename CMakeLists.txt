@@ -20,6 +20,8 @@ juce_add_plugin(Asam
     FORMATS VST3 AU Standalone
     PRODUCT_NAME "Asam"
     DESCRIPTION "Distorted acid bassline synth with a live step sequencer"
+    # Drawn by Resources/Icon/asam-app-icon.swift. JUCE makes the .icns when CMake configures.
+    ICON_BIG Resources/Icon/asam-app-icon.png
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
