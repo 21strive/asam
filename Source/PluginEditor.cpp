@@ -36,24 +36,23 @@ namespace
         return proc.getState().getRawParameterValue (id)->load();
     }
 
-    /** The 21 Strive logogram: a 2 and a 1 cut from one block (201.6 x 100). */
-    const juce::Path& strivePath()
+    /** The Asam mark, Luncur: a low note slides up to its octave, drawn on the 21 Strive
+        construction (each note one stem wide, 46.5; the slide rises 50 over 54.3). 147.3 x 100. */
+    constexpr float asamMarkWidth = 147.3f;
+
+    const juce::Path& asamMarkPath()
     {
-        static const juce::Path p = []
-        {
-            juce::Path path;
-            path.addPath (juce::Drawable::parseSVGPath ("M0 0H77.55L23.25 50H100.8L46.5 100H0Z"));
-            path.addPath (juce::Drawable::parseSVGPath ("M100.8 50L155.1 0H201.6V100H155.1V50Z"));
-            return path;
-        }();
+        static const juce::Path p = juce::Drawable::parseSVGPath ("M0 50H46.5L100.8 0H147.3V50H100.8L46.5 100H0Z");
         return p;
     }
 
-    void drawStriveMark (juce::Graphics& g, float x, float centreY, float height, juce::Colour colour)
+    /** Draws the Asam mark `height` tall with its left edge at x, and returns its width. */
+    float drawAsamMark (juce::Graphics& g, float x, float centreY, float height, juce::Colour colour)
     {
         const auto scale = height / 100.0f;
         g.setColour (colour);
-        g.fillPath (strivePath(), juce::AffineTransform::scale (scale).translated (x, centreY - height * 0.5f));
+        g.fillPath (asamMarkPath(), juce::AffineTransform::scale (scale).translated (x, centreY - height * 0.5f));
+        return asamMarkWidth * scale;
     }
 
     float drawBadge (juce::Graphics& g, float x, float centreY, const juce::String& text, const ToneColours& tone)
@@ -1204,8 +1203,7 @@ public:
         const auto cy = r.getCentreY();
         auto x = r.getX() + 16.0f;
 
-        drawStriveMark (g, x, cy, 10.0f, c.text);
-        x += 20.16f + 12.0f;
+        x += drawAsamMark (g, x, cy, 10.0f, c.text) + 12.0f;
 
         const juce::String product ("Asam AS-16 acid line");
         drawText (g, product.toUpperCase(), { x, r.getY(), 400.0f, r.getHeight() }, f, c.text);
