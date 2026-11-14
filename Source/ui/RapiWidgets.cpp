@@ -344,6 +344,202 @@ std::unique_ptr<juce::AccessibilityHandler> Knob::createAccessibilityHandler()
 }
 
 //==============================================================================
+Slider::Slider (juce::RangedAudioParameter& p, const juce::String& labelText)
+    : param (p),
+      attachment (p, [this] (float v) { value = v; repaint(); }),
+      label (labelText)
+{
+    const auto& range = p.getNormalisableRange();
+    minValue = range.start;
+    maxValue = range.end;
+    step     = range.interval > 0.0f ? range.interval : (maxValue - minValue) / 100.0f;
+    value    = p.convertFrom0to1 (p.getValue());
+
+    formatter = [this] (float v) { return ValueText { param.getText (param.convertTo0to1 (v), 32), {} }; };
+
+    setWantsKeyboardFocus (true);
+    setTitle (labelText);
+    setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    attachment.sendInitialUpdate();
+}
+
+Slider::~Slider() = default;
+
+float Slider::proportion() const noexcept
+{
+    return maxValue > minValue ? juce::jlimit (0.0f, 1.0f, (value - minValue) / (maxValue - minValue)) : 0.0f;
+}
+
+juce::Rectangle<float> Slider::controlBounds() const
+{
+    return { 0.0f, 16.0f + 6.0f, (float) getWidth(), 20.0f };
+}
+
+juce::Rectangle<float> Slider::thumbBounds() const
+{
+    // .r-slider: the 14 px thumb travels inset by half its width at each end
+    const auto c = controlBounds();
+    return { c.getX() + proportion() * (c.getWidth() - 14.0f), c.getY() + 3.0f, 14.0f, 14.0f };
+}
+
+float Slider::valueAt (float x) const noexcept
+{
+    const auto c = controlBounds();
+    const auto p = juce::jlimit (0.0f, 1.0f, (x - c.getX() - 7.0f) / juce::jmax (1.0f, c.getWidth() - 14.0f));
+    return minValue + p * (maxValue - minValue);
+}
+
+void Slider::setFromUser (float newValue, bool asGesture)
+{
+    auto v = juce::jlimit (minValue, maxValue, newValue);
+    const auto interval = param.getNormalisableRange().interval;
+
+    if (interval > 0.0f)
+        v = juce::jlimit (minValue, maxValue, minValue + std::round ((v - minValue) / interval) * interval);
+
+    if (juce::approximatelyEqual (v, value))
+        return;
+
+    value = v;
+
+    if (asGesture)
+        attachment.setValueAsPartOfGesture (v);
+    else
+        attachment.setValueAsCompleteGesture (v);
+
+    repaint();
+}
+
+void Slider::paint (juce::Graphics& g)
+{
+    const auto& c = colours();
+    const auto w  = (float) getWidth();
+
+    // Head: the label in Geist, the value in Geist Mono with its unit small and quiet
+    drawText (g, label, { 0.0f, 0.0f, w * 0.5f, 16.0f }, font (Family::sans, Weight::medium, 12.0f), c.textSecondary);
+    const auto shown = formatter != nullptr ? formatter (value) : ValueText { juce::String (value, 1), {} };
+    drawValueAndUnit (g, shown.number, shown.unit, { w * 0.4f, 0.0f, w * 0.6f, 16.0f },
+                      font (Family::mono, Weight::medium, 13.0f, 0.0f, true), font (Family::mono, Weight::medium, 10.0f, 0.08f),
+                      c.text, c.textTertiary, juce::Justification::centredRight);
+
+    // Track, cobalt fill to the thumb's centre, then the thumb
+    const auto control = controlBounds();
+    const auto thumb   = thumbBounds();
+    g.setColour (c.borderStrong);
+    g.fillRect (control.getX(), control.getY() + 9.0f, control.getWidth(), 2.0f);
+    g.setColour (c.brand);
+    g.fillRect (control.getX(), control.getY() + 9.0f, thumb.getCentreX() - control.getX(), 2.0f);
+
+    const bool hot = isEnabled() && (isMouseOver() || dragging);
+    g.setColour (dragging ? c.bgPressed : (hot ? c.bgHover : c.bgSurface));
+    g.fillRect (thumb);
+    drawBorder (g, thumb, c.text);
+}
+
+void Slider::mouseDown (const juce::MouseEvent& e)
+{
+    if (! isEnabled() || ! e.mods.isLeftButtonDown())
+        return;
+
+    grabKeyboardFocus();
+    attachment.beginGesture();
+    dragging  = true;
+    lastDragX = e.position.x;
+
+    // Like a range input: a click on the track puts the thumb there.
+    if (! thumbBounds().expanded (2.0f).contains (e.position) && ! e.mods.isShiftDown())
+        setFromUser (valueAt (e.position.x), true);
+
+    dragRaw = value;
+    repaint();
+}
+
+void Slider::mouseDrag (const juce::MouseEvent& e)
+{
+    if (! dragging)
+        return;
+
+    const auto span = juce::jmax (1.0f, controlBounds().getWidth() - 14.0f);
+    const auto perPixel = (maxValue - minValue) / span * (e.mods.isShiftDown() ? 0.1f : 1.0f);
+    dragRaw   = juce::jlimit (minValue, maxValue, dragRaw + (e.position.x - lastDragX) * perPixel);
+    lastDragX = e.position.x;
+    setFromUser (dragRaw, true);
+}
+
+void Slider::mouseUp (const juce::MouseEvent&)
+{
+    if (! dragging)
+        return;
+
+    dragging = false;
+    attachment.endGesture();
+    repaint();
+}
+
+void Slider::mouseDoubleClick (const juce::MouseEvent&)
+{
+    if (isEnabled())
+        setFromUser (param.convertFrom0to1 (param.getDefaultValue()), false);
+}
+
+void Slider::mouseWheelMove (const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+{
+    if (! isEnabled() || ! hasKeyboardFocus (false))
+    {
+        Component::mouseWheelMove (e, wheel);
+        return;
+    }
+
+    wheelAccumulator += wheel.deltaY * (wheel.isReversed ? -1.0f : 1.0f) * 256.0f;
+
+    if (std::abs (wheelAccumulator) >= 40.0f)
+    {
+        setFromUser (value + signOf (wheelAccumulator) * step * (e.mods.isShiftDown() ? 10.0f : 1.0f), false);
+        wheelAccumulator = 0.0f;
+    }
+}
+
+bool Slider::keyPressed (const juce::KeyPress& key)
+{
+    if (! isEnabled())
+        return false;
+
+    const auto code  = key.getKeyCode();
+    const auto small = step * (key.getModifiers().isShiftDown() ? 10.0f : 1.0f);
+
+    if (code == juce::KeyPress::upKey || code == juce::KeyPress::rightKey)      setFromUser (value + small, false);
+    else if (code == juce::KeyPress::downKey || code == juce::KeyPress::leftKey) setFromUser (value - small, false);
+    else if (code == juce::KeyPress::homeKey)                                    setFromUser (minValue, false);
+    else if (code == juce::KeyPress::endKey)                                     setFromUser (maxValue, false);
+    else return false;
+
+    return true;
+}
+
+void Slider::focusGained (FocusChangeType cause)   { updateFocus (*this, true, cause); }
+void Slider::focusLost (FocusChangeType cause)     { updateFocus (*this, false, cause); }
+void Slider::enablementChanged()                   { setAlpha (isEnabled() ? 1.0f : 0.45f); }
+
+std::unique_ptr<juce::AccessibilityHandler> Slider::createAccessibilityHandler()
+{
+    class ValueInterface : public juce::AccessibilityRangedNumericValueInterface
+    {
+    public:
+        explicit ValueInterface (Slider& s) : slider (s) {}
+        bool isReadOnly() const override                { return false; }
+        double getCurrentValue() const override         { return slider.value; }
+        void setValue (double v) override               { slider.setFromUser ((float) v, false); }
+        AccessibleValueRange getRange() const override  { return { { slider.minValue, slider.maxValue }, slider.step }; }
+
+    private:
+        Slider& slider;
+    };
+
+    return std::make_unique<juce::AccessibilityHandler> (*this, juce::AccessibilityRole::slider, juce::AccessibilityActions {},
+                                                         juce::AccessibilityHandler::Interfaces { std::make_unique<ValueInterface> (*this) });
+}
+
+//==============================================================================
 Button::Button (const juce::String& text, Variant v, Tone t, Size s)
     : juce::Button (text), variant (v), tone (t), size (s)
 {
@@ -838,6 +1034,178 @@ std::unique_ptr<juce::AccessibilityHandler> Segmented::createAccessibilityHandle
 }
 
 //==============================================================================
+Tabs::Tabs (juce::StringArray tabLabels)
+    : labels (std::move (tabLabels))
+{
+    setWantsKeyboardFocus (true);
+    setMouseCursor (juce::MouseCursor::PointingHandCursor);
+}
+
+juce::Font Tabs::labelFont()
+{
+    return font (Family::sans, Weight::medium, 14.0f);
+}
+
+int Tabs::getIdealWidth() const
+{
+    float total = 0.0f;
+
+    for (auto& l : labels)
+        total += std::ceil (textWidth (labelFont(), l)) + 4.0f;
+
+    return juce::roundToInt (total + 24.0f * (float) juce::jmax (0, labels.size() - 1));
+}
+
+juce::Rectangle<float> Tabs::tabBounds (int index) const
+{
+    if (! juce::isPositiveAndBelow (index, labels.size()))
+        return {};
+
+    float x = 0.0f;
+
+    for (int i = 0; i < index; ++i)
+        x += std::ceil (textWidth (labelFont(), labels[i])) + 4.0f + 24.0f;
+
+    const auto h = (float) juce::jmin (getHeight(), height);
+    return { x, (float) getHeight() - h, std::ceil (textWidth (labelFont(), labels[index])) + 4.0f, h };
+}
+
+int Tabs::tabAt (juce::Point<float> p) const
+{
+    for (int i = 0; i < labels.size(); ++i)
+        if (tabBounds (i).contains (p))
+            return i;
+
+    return -1;
+}
+
+void Tabs::resized()
+{
+    const auto r = tabBounds (selected);
+    barX.snapTo (r.getX());
+    barW.snapTo (r.getWidth());
+}
+
+void Tabs::setSelected (int index, bool notify)
+{
+    index = juce::jlimit (0, juce::jmax (0, labels.size() - 1), index);
+
+    if (index == selected)
+        return;
+
+    selected = index;
+    const auto r = tabBounds (selected);
+
+    // The bar slides only on screen; before the tabs are shown it simply sits under the choice.
+    if (isShowing())
+    {
+        barX.setTarget (r.getX(), motion::base);
+        barW.setTarget (r.getWidth(), motion::base);
+    }
+    else
+    {
+        barX.snapTo (r.getX());
+        barW.snapTo (r.getWidth());
+    }
+
+    repaint();
+
+    if (notify && onChange != nullptr)
+        onChange (selected);
+
+    if (auto* handler = getAccessibilityHandler())
+        handler->notifyAccessibilityEvent (juce::AccessibilityEvent::valueChanged);
+}
+
+void Tabs::paint (juce::Graphics& g)
+{
+    const auto& c = colours();
+    const auto b  = getLocalBounds().toFloat();
+
+    // .r-tabs__list: the rule runs the full width, the bar sits on it
+    g.setColour (c.border);
+    g.fillRect (b.getX(), b.getBottom() - 1.0f, b.getWidth(), 1.0f);
+
+    for (int i = 0; i < labels.size(); ++i)
+    {
+        const auto r = tabBounds (i);
+        const auto colour = ! isEnabled() ? c.textDisabled
+                                          : ((i == selected || i == hovered) ? c.text : c.textTertiary);
+        drawText (g, labels[i], r, labelFont(), colour, juce::Justification::centred, false);
+    }
+
+    g.setColour (c.ink);
+    g.fillRect (barX.get(), b.getBottom() - 2.0f, barW.get(), 2.0f);
+}
+
+void Tabs::mouseMove (const juce::MouseEvent& e)
+{
+    const auto h = tabAt (e.position);
+
+    if (h != hovered)
+    {
+        hovered = h;
+        repaint();
+    }
+}
+
+void Tabs::mouseExit (const juce::MouseEvent&)
+{
+    hovered = -1;
+    repaint();
+}
+
+void Tabs::mouseDown (const juce::MouseEvent& e)
+{
+    if (! isEnabled())
+        return;
+
+    const auto i = tabAt (e.position);
+
+    if (i >= 0)
+        setSelected (i, true);
+}
+
+bool Tabs::keyPressed (const juce::KeyPress& key)
+{
+    if (! isEnabled())
+        return false;
+
+    const auto code = key.getKeyCode();
+    const auto last = labels.size() - 1;
+
+    if (code == juce::KeyPress::leftKey)        setSelected (selected > 0 ? selected - 1 : last, true);
+    else if (code == juce::KeyPress::rightKey)  setSelected (selected < last ? selected + 1 : 0, true);
+    else if (code == juce::KeyPress::homeKey)   setSelected (0, true);
+    else if (code == juce::KeyPress::endKey)    setSelected (last, true);
+    else return false;
+
+    return true;
+}
+
+void Tabs::focusGained (FocusChangeType cause)    { updateFocus (*this, true, cause); }
+void Tabs::focusLost (FocusChangeType cause)      { updateFocus (*this, false, cause); }
+
+std::unique_ptr<juce::AccessibilityHandler> Tabs::createAccessibilityHandler()
+{
+    class ValueInterface : public juce::AccessibilityTextValueInterface
+    {
+    public:
+        explicit ValueInterface (Tabs& t) : tabs (t) {}
+        bool isReadOnly() const override                        { return false; }
+        juce::String getCurrentValueAsString() const override   { return tabs.labels[tabs.selected]; }
+        void setValueAsString (const juce::String& v) override  { tabs.setSelected (tabs.labels.indexOf (v), true); }
+
+    private:
+        Tabs& tabs;
+    };
+
+    return std::make_unique<juce::AccessibilityHandler> (*this, juce::AccessibilityRole::group,
+                                                         juce::AccessibilityActions {},
+                                                         juce::AccessibilityHandler::Interfaces { std::make_unique<ValueInterface> (*this) });
+}
+
+//==============================================================================
 Switch::Switch (const juce::String& labelText, Size s)
     : juce::Button (labelText), size (s)
 {
@@ -865,7 +1233,12 @@ juce::Rectangle<float> Switch::getFocusRingArea() const
 
 void Switch::buttonStateChanged()
 {
-    knob.setTarget (getToggleState() ? 1.0f : 0.0f, motion::fast);
+    // The key slides only on screen; set before the switch is shown, it starts where it belongs.
+    if (isShowing())
+        knob.setTarget (getToggleState() ? 1.0f : 0.0f, motion::fast);
+    else
+        knob.snapTo (getToggleState() ? 1.0f : 0.0f);
+
     repaint();
 }
 

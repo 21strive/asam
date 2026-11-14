@@ -36,7 +36,7 @@ struct Palette
     juce::Colour focus, marks;
     // Status and charts
     juce::Colour statusGood, statusWarning, statusCritical, statusOff;
-    juce::Colour chartTrack;
+    juce::Colour chartTrack, chart1, chartGrid, chartAxis, chartLabel, chartInk;
 
     ToneColours neutral, brandTone, signalTone, success, warning, danger;
 

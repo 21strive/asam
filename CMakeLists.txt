@@ -45,6 +45,7 @@ set(ASAM_CORE_SOURCES
     Source/Params.cpp
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
+    Source/SoundPreset.cpp
     Source/seq/PatternBank.cpp
     Source/ui/RapiTheme.cpp
     Source/ui/RapiIcons.cpp

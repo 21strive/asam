@@ -126,6 +126,58 @@ private:
 };
 
 //==============================================================================
+/**
+    RSlider: a label and its value over a 2 px track with a cobalt fill and a square 14 px thumb
+    ruled in ink. Click or drag along the track (Shift for fine), arrow keys step (Shift for ten),
+    Home / End, the wheel while focused, double-click for the default.
+*/
+class Slider : public juce::Component,
+               public FocusVisible
+{
+public:
+    Slider (juce::RangedAudioParameter& parameter, const juce::String& label);
+    ~Slider() override;
+
+    void setFormatter (std::function<ValueText (float)> f)   { formatter = std::move (f); repaint(); }
+    void setStep (float newStep)                              { step = newStep; }
+
+    /** Head (label and value), 6 px, then the 20 px control. */
+    static constexpr int preferredHeight = 16 + 6 + 20;
+
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseDrag (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override;
+    void mouseDoubleClick (const juce::MouseEvent&) override;
+    void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseEnter (const juce::MouseEvent&) override   { repaint(); }
+    void mouseExit (const juce::MouseEvent&) override    { repaint(); }
+    bool keyPressed (const juce::KeyPress&) override;
+    void focusGained (FocusChangeType) override;
+    void focusLost (FocusChangeType) override;
+    void enablementChanged() override;
+
+    std::unique_ptr<juce::AccessibilityHandler> createAccessibilityHandler() override;
+    juce::Rectangle<float> getFocusRingArea() const override   { return thumbBounds(); }
+    float getFocusRingOffset() const override                   { return 1.0f; }
+
+private:
+    juce::Rectangle<float> controlBounds() const;
+    juce::Rectangle<float> thumbBounds() const;
+    float proportion() const noexcept;
+    float valueAt (float x) const noexcept;
+    void setFromUser (float newValue, bool asGesture);
+
+    juce::RangedAudioParameter& param;
+    juce::ParameterAttachment attachment;
+    juce::String label;
+    float value = 0.0f, minValue = 0.0f, maxValue = 1.0f, step = 0.01f;
+    std::function<ValueText (float)> formatter;
+    bool dragging = false;
+    float lastDragX = 0.0f, dragRaw = 0.0f, wheelAccumulator = 0.0f;
+};
+
+//==============================================================================
 /** RButton: square, 1 px rule, Geist Medium label, optional leading Lucide icon. */
 class Button : public juce::Button,
                public FocusVisible
@@ -238,6 +290,47 @@ private:
     Size size;
     int selected = 0, hovered = -1;
     Animated thumbX { *this }, thumbW { *this };
+};
+
+//==============================================================================
+/** RTabs: labels on a 1 px rule, quiet until hovered or chosen; the chosen one is ink with a
+    2 px ink bar under it that slides from tab to tab. Arrow keys, Home and End move along the
+    row and choose as they go. Exact Rapi geometry: 40 px tall, 24 px apart, 2 px side padding,
+    Geist Medium 14. */
+class Tabs : public juce::Component,
+             public FocusVisible
+{
+public:
+    explicit Tabs (juce::StringArray labels);
+
+    void setSelected (int index, bool notify);
+    int getSelected() const noexcept                    { return selected; }
+    int getIdealWidth() const;
+    static constexpr int height = control::lg;
+
+    std::function<void (int)> onChange;
+
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void mouseMove (const juce::MouseEvent&) override;
+    void mouseExit (const juce::MouseEvent&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    bool keyPressed (const juce::KeyPress&) override;
+    void focusGained (FocusChangeType) override;
+    void focusLost (FocusChangeType) override;
+
+    std::unique_ptr<juce::AccessibilityHandler> createAccessibilityHandler() override;
+    juce::Rectangle<float> getFocusRingArea() const override   { return tabBounds (selected); }
+    float getFocusRingOffset() const override                   { return -2.0f; }
+
+private:
+    juce::Rectangle<float> tabBounds (int index) const;
+    int tabAt (juce::Point<float> p) const;
+    static juce::Font labelFont();
+
+    juce::StringArray labels;
+    int selected = 0, hovered = -1;
+    Animated barX { *this }, barW { *this };
 };
 
 //==============================================================================

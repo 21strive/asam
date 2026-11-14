@@ -54,6 +54,11 @@ namespace
         p.statusCritical = hex (0xcb2430);
         p.statusOff      = hex (0xa3a3a3);
         p.chartTrack     = hex (0x222222);
+        p.chart1         = hex (0x4970eb);  // cobalt-500
+        p.chartGrid      = hex (0x222222);
+        p.chartAxis      = hex (0x424242);
+        p.chartLabel     = hex (0x8f8f8f);
+        p.chartInk       = hex (0xededed);
 
         p.neutral    = { p.ink, p.inkHover, p.onInk, p.bgHover, p.bgPressed, p.textSecondary, p.borderStrong, p.statusOff };
         p.brandTone  = { p.brandFill, p.brandFillHover, p.onBrand, hexA (0x4970eb, 0.15f), hexA (0x4970eb, 0.24f),
@@ -113,6 +118,11 @@ namespace
         p.statusCritical = hex (0xcb2430);
         p.statusOff      = hex (0xa3a3a3);
         p.chartTrack     = hex (0xededed);
+        p.chart1         = hex (0x3254cc);  // cobalt-600
+        p.chartGrid      = hex (0xededed);  // neutral-100
+        p.chartAxis      = hex (0xc2c2c2);  // neutral-300
+        p.chartLabel     = hex (0x6b6b6b);  // neutral-500
+        p.chartInk       = hex (0x151515);  // neutral-900
 
         p.neutral    = { p.ink, p.inkHover, p.onInk, p.bgHover, p.bgPressed, p.textSecondary, p.borderStrong, p.statusOff };
         p.brandTone  = { p.brandFill, p.brandFillHover, p.onBrand, hex (0xf3f7ff), hex (0xe5edff), p.brandText, hex (0xc9d9fe), p.brand };

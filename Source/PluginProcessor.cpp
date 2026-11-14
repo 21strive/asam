@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "SoundPreset.h"
 
 using namespace asam;
 
@@ -14,6 +15,12 @@ namespace
         const auto q = a / b;
         return (a % b != 0 && ((a < 0) != (b < 0))) ? q - 1 : q;
     }
+
+    /** A voice's Volume knob, in dB, to gain: the bottom of the range is silence. */
+    float levelGain (float dB) noexcept
+    {
+        return dB <= -35.95f ? 0.0f : juce::Decibels::decibelsToGain (dB);
+    }
 }
 
 //==============================================================================
@@ -21,15 +28,29 @@ AsamProcessor::AsamProcessor()
     : AudioProcessor (BusesProperties().withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       parameters (*this, nullptr, "AsamState", createParameterLayout())
 {
-    pCutoff    = parameters.getRawParameterValue (pid::cutoff);
-    pResonance = parameters.getRawParameterValue (pid::resonance);
-    pEnvMod    = parameters.getRawParameterValue (pid::envMod);
-    pDecay     = parameters.getRawParameterValue (pid::decay);
-    pAccent    = parameters.getRawParameterValue (pid::accent);
-    pDrive     = parameters.getRawParameterValue (pid::drive);
-    pTone      = parameters.getRawParameterValue (pid::tone);
+    for (int v = 0; v < numVoices; ++v)
+    {
+        auto raw = [this, v] (const char* base) { return parameters.getRawParameterValue (pid::forVoice (v, base)); };
+        auto& p = voiceParams[(size_t) v];
+
+        p.cutoff     = raw (pid::cutoff);
+        p.resonance  = raw (pid::resonance);
+        p.envMod     = raw (pid::envMod);
+        p.decay      = raw (pid::decay);
+        p.release    = raw (pid::release);
+        p.accent     = raw (pid::accent);
+        p.waveform   = raw (pid::waveform);
+        p.unison     = raw (pid::unison);
+        p.detune     = raw (pid::detune);
+        p.width      = raw (pid::width);
+        p.level      = raw (pid::level);
+        p.filterMode = raw (pid::filterMode);
+        p.enabled    = raw (pid::enabled);
+        p.drive      = raw (pid::drive);
+        p.tone       = raw (pid::tone);
+    }
+
     pVolume    = parameters.getRawParameterValue (pid::volume);
-    pWaveform  = parameters.getRawParameterValue (pid::waveform);
     pTempo     = parameters.getRawParameterValue (pid::tempo);
     pSwing     = parameters.getRawParameterValue (pid::swing);
     pHostSync  = parameters.getRawParameterValue (pid::hostSync);
@@ -39,8 +60,24 @@ AsamProcessor::AsamProcessor()
     for (auto& s : steps)
         s.store (0);
 
+    for (auto& id : soundParameterIds())
+        soundRaw.push_back (parameters.getRawParameterValue (id));
+
     heldNotes.ensureStorageAllocated (128);
     loadPreset (0);
+    takeSoundSnapshot ("Init", {});
+}
+
+double AsamProcessor::getTailLengthSeconds() const
+{
+    // The longest release among the voices that are on, plus the latency of the oversampler.
+    float longest = 0.0f;
+
+    for (const auto& p : voiceParams)
+        if (p.enabled->load() > 0.5f)
+            longest = std::max (longest, map::releaseSeconds (p.release->load()));
+
+    return (double) longest + 0.1;
 }
 
 bool AsamProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
@@ -59,14 +96,21 @@ void AsamProcessor::prepareToPlay (double sampleRate, int)
     const auto osRate = sampleRate * osFactor;
 
     oversampler = std::make_unique<juce::dsp::Oversampling<float>> (
-        1, (size_t) stages, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
+        2, (size_t) stages, juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, false);
     oversampler->initProcessing ((size_t) maxChunk);
     oversampler->reset();
-    silence.setSize (1, maxChunk);
+    silence.setSize (2, maxChunk);
     silence.clear();
+    scratch.setSize (2, maxChunk);
 
-    voice.prepare (osRate);
-    drive.prepare (osRate);
+    for (auto& v : voices)
+        v.prepare (osRate);
+
+    for (auto& d : drivesL)
+        d.prepare (osRate);
+
+    for (auto& d : drivesR)
+        d.prepare (osRate);
 
     auto initSmoother = [sampleRate] (juce::SmoothedValue<float>& s, float value, double seconds)
     {
@@ -74,14 +118,29 @@ void AsamProcessor::prepareToPlay (double sampleRate, int)
         s.setCurrentAndTargetValue (value);
     };
 
-    initSmoother (smCutoff,    pCutoff->load(),    0.012);
-    initSmoother (smResonance, pResonance->load(), 0.020);
-    initSmoother (smEnvMod,    pEnvMod->load(),    0.020);
-    initSmoother (smDrive,     pDrive->load(),     0.030);
-    initSmoother (smTone,      pTone->load(),      0.030);
-    initSmoother (smVolume,    pVolume->load(),    0.030);
+    for (int v = 0; v < numVoices; ++v)
+    {
+        const auto& p = voiceParams[(size_t) v];
+        auto& sm = voiceSmoothing[(size_t) v];
 
-    drive.setParams (smDrive.getCurrentValue(), smTone.getCurrentValue());
+        initSmoother (sm.cutoff,    p.cutoff->load(),    0.012);
+        initSmoother (sm.resonance, p.resonance->load(), 0.020);
+        initSmoother (sm.envMod,    p.envMod->load(),    0.020);
+        initSmoother (sm.detune,    p.detune->load(),    0.050);
+        initSmoother (sm.width,     p.width->load(),     0.050);
+        initSmoother (sm.level,     levelGain (p.level->load()), 0.030);
+        initSmoother (sm.drive,     p.drive->load(),     0.030);
+        initSmoother (sm.tone,      p.tone->load(),      0.030);
+
+        sm.active = p.enabled->load() > 0.5f;
+        sm.onGain = sm.active ? 1.0f : 0.0f;
+
+        drivesL[(size_t) v].setParams (sm.drive.getCurrentValue(), sm.tone.getCurrentValue());
+        drivesR[(size_t) v] = drivesL[(size_t) v];
+    }
+
+    initSmoother (smVolume, pVolume->load(), 0.030);
+    onGainCoef = asam::dsp::smoothingCoef (0.004f, (float) sampleRate);
 
     setLatencySamples (juce::roundToInt (oversampler->getLatencyInSamples()));
     resetSequencer();
@@ -169,14 +228,43 @@ void AsamProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
     viewHostAvailable.store (! isStandalone());
     viewRunning.store (seqRunning);
 
-    smCutoff.setTargetValue (pCutoff->load());
-    smResonance.setTargetValue (pResonance->load());
-    smEnvMod.setTargetValue (pEnvMod->load());
-    smDrive.setTargetValue (pDrive->load());
-    smTone.setTargetValue (pTone->load());
+    // Per voice: smoothed knobs follow their targets, the rest is read once a block.
+    struct VoiceBlock
+    {
+        float decaySeconds, releaseSeconds, accent;
+        int unison, filterMode;
+        bool square, on;
+    };
+
+    std::array<VoiceBlock, numVoices> vb;
+
+    for (int v = 0; v < numVoices; ++v)
+    {
+        const auto& p = voiceParams[(size_t) v];
+        auto& sm = voiceSmoothing[(size_t) v];
+
+        sm.cutoff.setTargetValue (p.cutoff->load());
+        sm.resonance.setTargetValue (p.resonance->load());
+        sm.envMod.setTargetValue (p.envMod->load());
+        sm.detune.setTargetValue (p.detune->load());
+        sm.width.setTargetValue (p.width->load());
+        sm.level.setTargetValue (levelGain (p.level->load()));
+        sm.drive.setTargetValue (p.drive->load());
+        sm.tone.setTargetValue (p.tone->load());
+
+        vb[(size_t) v] = { map::decaySeconds (p.decay->load()), map::releaseSeconds (p.release->load()), p.accent->load(),
+                           map::unisonVoices (juce::roundToInt (p.unison->load())),
+                           juce::jlimit (0, 3, juce::roundToInt (p.filterMode->load())),
+                           p.waveform->load() > 0.5f, p.enabled->load() > 0.5f };
+    }
+
     smVolume.setTargetValue (pVolume->load());
 
-    auto* out = buffer.getWritePointer (0);
+    const auto numOut = buffer.getNumChannels();
+    auto* outL = buffer.getWritePointer (0);
+    auto* outR = numOut > 1 ? buffer.getWritePointer (1) : nullptr;
+    float peak = 0.0f;
+
     auto midiIt  = midi.cbegin();
     auto midiEnd = midi.cend();
 
@@ -184,10 +272,11 @@ void AsamProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
     {
         const auto n = std::min (maxChunk, numSamples - done);
 
-        // Handle MIDI and the sequencer sample-accurately while rendering the oversampled voice.
-        juce::dsp::AudioBlock<const float> zeros (silence.getArrayOfReadPointers(), 1, (size_t) n);
+        // Handle MIDI and the sequencer sample-accurately while rendering the oversampled voices.
+        juce::dsp::AudioBlock<const float> zeros (silence.getArrayOfReadPointers(), 2, (size_t) n);
         auto osBlock = oversampler->processSamplesUp (zeros);
-        auto* os = osBlock.getChannelPointer (0);
+        auto* osL = osBlock.getChannelPointer (0);
+        auto* osR = osBlock.getChannelPointer (1);
 
         const double pos16PerSample = (double) bpm / 60.0 * 4.0 / baseRate;
         const double hostPpq0 = (syncWanted && hostPlaying) ? *position->getPpqPosition() : 0.0;
@@ -215,31 +304,151 @@ void AsamProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
                 }
             }
 
-            dsp::VoiceParams vp;
-            const auto res = smResonance.getNextValue();
-            vp.cutoffHz      = map::cutoffHz (smCutoff.getNextValue());
-            vp.resonance01   = res;
-            vp.resonanceK    = map::resonanceK (1.0f - (1.0f - res) * (1.0f - res));
-            vp.envModOctaves = map::envModOctaves (smEnvMod.getNextValue());
-            vp.decaySeconds  = map::decaySeconds (pDecay->load());
-            vp.accent01      = pAccent->load();
-            vp.square        = pWaveform->load() > 0.5f;
-            voice.setParams (vp);
-
-            if (smDrive.isSmoothing() || smTone.isSmoothing() || (index & 31) == 0)
-                drive.setParams (smDrive.getNextValue(), smTone.getNextValue());
-            else
+            for (int v = 0; v < numVoices; ++v)
             {
-                smDrive.skip (1);
-                smTone.skip (1);
+                auto& sm = voiceSmoothing[(size_t) v];
+                const auto& b = vb[(size_t) v];
+
+                if (b.on && ! sm.active)
+                {
+                    // Switched on: start from the knobs as they are now, not where they were, and
+                    // in phase with a voice that is already sounding.
+                    sm.active = true;
+
+                    for (auto* s : { &sm.cutoff, &sm.resonance, &sm.envMod, &sm.detune, &sm.width, &sm.level, &sm.drive, &sm.tone })
+                        s->setCurrentAndTargetValue (s->getTargetValue());
+
+                    drivesL[(size_t) v].setParams (sm.drive.getCurrentValue(), sm.tone.getCurrentValue());
+
+                    for (int other = 0; other < numVoices; ++other)
+                    {
+                        if (other != v && voiceSmoothing[(size_t) other].active)
+                        {
+                            voices[(size_t) v].followPhase (voices[(size_t) other]);
+                            break;
+                        }
+                    }
+                }
+
+                if (! sm.active)
+                    continue;
+
+                sm.onGain += ((b.on ? 1.0f : 0.0f) - sm.onGain) * onGainCoef;
+
+                if (! b.on && sm.onGain < 1.0e-4f)
+                {
+                    // Faded out: stop rendering, and start from rest when it comes back.
+                    sm.onGain = 0.0f;
+                    sm.active = false;
+                    voices[(size_t) v].reset();
+                    continue;
+                }
+
+                dsp::VoiceParams vp;
+                const auto res = sm.resonance.getNextValue();
+                vp.cutoffHz       = map::cutoffHz (sm.cutoff.getNextValue());
+                vp.resonance01    = res;
+                vp.resonanceK     = map::resonanceK (1.0f - (1.0f - res) * (1.0f - res));
+                vp.svfQ           = map::svfQ (res);
+                vp.envModOctaves  = map::envModOctaves (sm.envMod.getNextValue());
+                vp.decaySeconds   = b.decaySeconds;
+                vp.releaseSeconds = b.releaseSeconds;
+                vp.accent01       = b.accent;
+                vp.square         = b.square;
+                vp.unison         = b.unison;
+                vp.detuneCents    = map::detuneCents (sm.detune.getNextValue());
+                vp.width          = sm.width.getNextValue();
+                vp.filterMode     = b.filterMode;
+                voices[(size_t) v].setParams (vp);
+
+                // Level after the voice's own distortion, so turning a voice down never cleans it up.
+                sm.gain = sm.level.getNextValue() * sm.onGain;
+
+                if (sm.drive.isSmoothing() || sm.tone.isSmoothing() || (index & 31) == 0)
+                {
+                    const auto d = sm.drive.getNextValue(), t = sm.tone.getNextValue();
+                    drivesL[(size_t) v].setParams (d, t);
+                    drivesR[(size_t) v].setParams (d, t);
+                }
+                else
+                {
+                    sm.drive.skip (1);
+                    sm.tone.skip (1);
+                }
             }
 
             for (int j = 0; j < osFactor; ++j)
-                os[i * osFactor + j] = drive.process (voice.render());
+            {
+                float mixL = 0.0f, mixR = 0.0f;
+
+                for (int v = 0; v < numVoices; ++v)
+                {
+                    const auto& sm = voiceSmoothing[(size_t) v];
+
+                    if (! sm.active)
+                        continue;
+
+                    // Voice, its distortion and tone, its level.
+                    const auto s = voices[(size_t) v].render();
+                    auto& dl = drivesL[(size_t) v];
+                    auto& dr = drivesR[(size_t) v];
+                    const auto l = dl.process (s.left);
+                    float r;
+
+                    if (s.stereo)
+                    {
+                        r = dr.process (s.right);
+                    }
+                    else
+                    {
+                        dr = dl;   // keep the right side's state in step
+                        r = l;
+                    }
+
+                    mixL += l * sm.gain;
+                    mixR += r * sm.gain;
+                }
+
+                osL[i * osFactor + j] = mixL;
+                osR[i * osFactor + j] = mixR;
+            }
         }
 
-        juce::dsp::AudioBlock<float> outBlock (&out, 1, (size_t) done, (size_t) n);
-        oversampler->processSamplesDown (outBlock);
+        juce::dsp::AudioBlock<float> chunk (scratch.getArrayOfWritePointers(), 2, 0, (size_t) n);
+        oversampler->processSamplesDown (chunk);
+
+        // Volume (the bottom of the range is silence), then a safety knee for the speakers:
+        // untouched below -3 dBFS, approaching 0 dBFS smoothly.
+        const auto* chunkL = scratch.getReadPointer (0);
+        const auto* chunkR = scratch.getReadPointer (1);
+
+        auto safe = [] (float y)
+        {
+            if (const auto a = std::abs (y); a > 0.7f)
+                return std::copysign (0.7f + 0.3f * std::tanh ((a - 0.7f) / 0.3f), y);
+
+            return y;
+        };
+
+        for (int i = 0; i < n; ++i)
+        {
+            const auto dB = smVolume.getNextValue();
+            const auto gain = dB <= -35.95f ? 0.0f : juce::Decibels::decibelsToGain (dB);
+            const auto l = safe (chunkL[i] * gain);
+            const auto r = safe (chunkR[i] * gain);
+
+            if (outR != nullptr)
+            {
+                outL[done + i] = l;
+                outR[done + i] = r;
+            }
+            else
+            {
+                outL[done + i] = 0.5f * (l + r);
+            }
+
+            peak = std::max (peak, std::max (std::abs (l), std::abs (r)));
+        }
 
         done += n;
     }
@@ -248,28 +457,18 @@ void AsamProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBu
     for (; midiIt != midiEnd; ++midiIt)
         handleMidi ((*midiIt).getMessage(), seqRunning);
 
-    // Volume, the bottom of the range is silence.
-    float peak = 0.0f;
-
-    for (int i = 0; i < numSamples; ++i)
-    {
-        const auto dB = smVolume.getNextValue();
-        const auto gain = dB <= -35.95f ? 0.0f : juce::Decibels::decibelsToGain (dB);
-        auto y = out[i] * gain;
-
-        // Safety knee for the speakers: untouched below -3 dBFS, approaches 0 dBFS smoothly.
-        if (const auto a = std::abs (y); a > 0.7f)
-            y = std::copysign (0.7f + 0.3f * std::tanh ((a - 0.7f) / 0.3f), y);
-
-        out[i] = y;
-        peak = std::max (peak, std::abs (y));
-    }
-
-    for (int ch = 1; ch < buffer.getNumChannels(); ++ch)
-        buffer.copyFrom (ch, 0, buffer, 0, 0, numSamples);
+    for (int ch = 2; ch < numOut; ++ch)
+        buffer.clear (ch, 0, numSamples);
 
     auto previous = outputPeak.load();
     while (peak > previous && ! outputPeak.compare_exchange_weak (previous, peak)) {}
+
+    for (int v = 0; v < numVoices; ++v)
+    {
+        const auto& sm = voiceSmoothing[(size_t) v];
+        liveCutoff[(size_t) v].store (voices[(size_t) v].getLiveCutoff());
+        liveLevel[(size_t) v].store (sm.active ? voices[(size_t) v].getLiveAmplitude() * sm.onGain : 0.0f);
+    }
 
     midi.clear();
 }
@@ -290,15 +489,15 @@ void AsamProcessor::handleMidi (const juce::MidiMessage& m, bool sequencerOwnsVo
         }
 
         const bool accent = m.getVelocity() >= 100;
-        const bool legato = ! heldNotes.isEmpty() && voice.isGateOpen();
+        const bool legato = ! heldNotes.isEmpty() && gateOpen;
 
         heldNotes.removeFirstMatchingValue (note);
         heldNotes.add (note);
 
         if (legato)
-            voice.glideTo (note, accent);
+            voicesGlideTo (note, accent);
         else
-            voice.noteOn (note, accent);
+            voicesNoteOn (note, accent);
 
         return;
     }
@@ -313,9 +512,9 @@ void AsamProcessor::handleMidi (const juce::MidiMessage& m, bool sequencerOwnsVo
             return;
 
         if (heldNotes.isEmpty())
-            voice.noteOff();
+            voicesNoteOff();
         else if (wasSounding)
-            voice.glideTo (heldNotes.getLast(), false);
+            voicesGlideTo (heldNotes.getLast(), false);
 
         return;
     }
@@ -325,7 +524,7 @@ void AsamProcessor::handleMidi (const juce::MidiMessage& m, bool sequencerOwnsVo
         heldNotes.clearQuick();
 
         if (! sequencerOwnsVoice)
-            voice.noteOff();
+            voicesNoteOff();
     }
 }
 
@@ -357,7 +556,7 @@ void AsamProcessor::sequencerTick (double pos16)
     }
     else if (seqGateOffPending && phase >= gateLength)
     {
-        voice.noteOff();
+        voicesNoteOff();
         seqGateOpen = false;
         seqGateOffPending = false;
     }
@@ -380,9 +579,9 @@ void AsamProcessor::triggerStep (long long absoluteStep)
     const auto note = juce::jlimit (0, 127, rootNote() + step.note + transpose);
 
     if (seqGateOpen && seqHoldThrough)
-        voice.glideTo (note, step.accent);
+        voicesGlideTo (note, step.accent);
     else
-        voice.noteOn (note, step.accent);
+        voicesNoteOn (note, step.accent);
 
     seqGateOpen       = true;
     seqHoldThrough    = step.slide;
@@ -392,9 +591,34 @@ void AsamProcessor::triggerStep (long long absoluteStep)
 void AsamProcessor::releaseSequencerNote()
 {
     if (seqGateOpen)
-        voice.noteOff();
+        voicesNoteOff();
 
     seqGateOpen = seqHoldThrough = seqGateOffPending = false;
+}
+
+void AsamProcessor::voicesNoteOn (int note, bool accent) noexcept
+{
+    for (auto& v : voices)
+        v.noteOn (note, accent);
+
+    gateOpen = true;
+}
+
+void AsamProcessor::voicesGlideTo (int note, bool accent) noexcept
+{
+    // A glide with the gate closed starts a new note; AcidVoice does the same.
+    for (auto& v : voices)
+        v.glideTo (note, accent);
+
+    gateOpen = true;
+}
+
+void AsamProcessor::voicesNoteOff() noexcept
+{
+    for (auto& v : voices)
+        v.noteOff();
+
+    gateOpen = false;
 }
 
 AsamProcessor::TransportView AsamProcessor::getTransportView() const noexcept
@@ -498,6 +722,74 @@ void AsamProcessor::bumpPattern()
 }
 
 //==============================================================================
+juce::Result AsamProcessor::loadSoundPreset (const juce::File& file)
+{
+    const auto xml = juce::XmlDocument::parse (file);
+
+    if (xml == nullptr)
+        return juce::Result::fail ("Could not read " + file.getFileName() + ".");
+
+    const auto result = preset::apply (parameters, *xml);
+
+    if (result.wasOk())
+        takeSoundSnapshot (preset::nameOf (*xml, file), file);
+
+    return result;
+}
+
+juce::Result AsamProcessor::saveSoundPreset (const juce::File& target)
+{
+    const auto file = target.hasFileExtension (preset::extension) ? target : target.withFileExtension (preset::extension);
+    const auto name = file.getFileNameWithoutExtension();
+
+    if (! file.getParentDirectory().createDirectory() || ! preset::toXml (parameters, name)->writeTo (file))
+        return juce::Result::fail ("Could not write " + file.getFullPathName() + ".");
+
+    takeSoundSnapshot (name, file);
+    return juce::Result::ok();
+}
+
+void AsamProcessor::initSound()
+{
+    preset::applyDefaults (parameters);
+    takeSoundSnapshot ("Init", {});
+}
+
+void AsamProcessor::takeSoundSnapshot (const juce::String& name, const juce::File& file)
+{
+    const juce::ScopedLock sl (metaLock);
+    soundPresetName = name;
+    soundPresetFile = file;
+    soundSnapshot.clearQuick();
+
+    for (auto* raw : soundRaw)
+        soundSnapshot.add (raw->load());
+}
+
+juce::String AsamProcessor::getSoundPresetName() const
+{
+    const juce::ScopedLock sl (metaLock);
+    return soundPresetName;
+}
+
+juce::File AsamProcessor::getSoundPresetFile() const
+{
+    const juce::ScopedLock sl (metaLock);
+    return soundPresetFile;
+}
+
+bool AsamProcessor::isSoundEdited() const
+{
+    const juce::ScopedLock sl (metaLock);
+
+    for (size_t i = 0; i < soundRaw.size(); ++i)
+        if (std::abs (soundRaw[i]->load() - soundSnapshot[(int) i]) > 1.0e-4f)
+            return true;
+
+    return false;
+}
+
+//==============================================================================
 void AsamProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = parameters.copyState();
@@ -516,7 +808,23 @@ void AsamProcessor::getStateInformation (juce::MemoryBlock& destData)
         pattern->setAttribute ("edited", patternEdited);
     }
 
+    {
+        // The sound preset in use, with the sound as it was when loaded or saved
+        const juce::ScopedLock sl (metaLock);
+        auto* sound = xml->createNewChildElement ("SoundPreset");
+        sound->setAttribute ("name", soundPresetName);
+        sound->setAttribute ("file", soundPresetFile.getFullPathName());
+
+        for (int i = 0; i < soundSnapshot.size(); ++i)
+        {
+            auto* param = sound->createNewChildElement ("PARAM");
+            param->setAttribute ("id", soundParameterIds()[i]);
+            param->setAttribute ("value", (double) soundSnapshot[i]);
+        }
+    }
+
     xml->setAttribute ("theme", darkTheme.load() ? "dark" : "light");
+    xml->setAttribute ("page", editorPage.load() == 1 ? "pattern" : "sound");
     copyXmlToBinary (*xml, destData);
 }
 
@@ -541,9 +849,40 @@ void AsamProcessor::setStateInformation (const void* data, int sizeInBytes)
         xml->removeChildElement (pattern, true);
     }
 
+    std::unique_ptr<juce::XmlElement> soundPreset;
+
+    if (auto* sound = xml->getChildByName ("SoundPreset"))
+    {
+        soundPreset = std::make_unique<juce::XmlElement> (*sound);
+        xml->removeChildElement (sound, true);
+    }
+
     darkTheme.store (xml->getStringAttribute ("theme", "dark") != "light");
+    editorPage.store (xml->getStringAttribute ("page", "sound") == "pattern" ? 1 : 0);
     xml->removeAttribute ("theme");
+    xml->removeAttribute ("page");
     parameters.replaceState (juce::ValueTree::fromXml (*xml));
+
+    // The preset that was in use. A session from before presets keeps its sound as "Untitled".
+    if (soundPreset == nullptr)
+    {
+        takeSoundSnapshot ("Untitled", {});
+        return;
+    }
+
+    const juce::String path = soundPreset->getStringAttribute ("file");
+    takeSoundSnapshot (soundPreset->getStringAttribute ("name", "Untitled"),
+                       juce::File::isAbsolutePath (path) ? juce::File (path) : juce::File());
+
+    const juce::ScopedLock sl (metaLock);
+
+    for (auto* param : soundPreset->getChildWithTagNameIterator ("PARAM"))
+    {
+        const auto index = soundParameterIds().indexOf (param->getStringAttribute ("id"));
+
+        if (juce::isPositiveAndBelow (index, soundSnapshot.size()))
+            soundSnapshot.set (index, (float) param->getDoubleAttribute ("value"));
+    }
 }
 
 //==============================================================================

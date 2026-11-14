@@ -29,7 +29,7 @@ public:
     bool keyStateChanged (bool isKeyDown) override;
     void focusLost (FocusChangeType) override;
 
-    static constexpr int logicalWidth  = 1120;
+    static constexpr int logicalWidth  = 1200;
     static constexpr int logicalHeight = 800;
 
     /** For the offline snapshot tool. */
@@ -37,6 +37,9 @@ public:
 
     /** Pushes the processor state into the view now, instead of on the next timer tick. */
     void refreshNow();
+
+    /** Opens a page: 0 is Sound (the voices), 1 is Pattern. */
+    void showPage (int page);
 
 private:
     class MainView;

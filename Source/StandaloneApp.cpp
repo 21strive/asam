@@ -18,6 +18,39 @@ juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter();
 namespace
 {
 
+/** JUCE runs a top-level window's constrainer on its native frame, title bar included, so a
+    3:2 ratio there leaves the editor one title bar short and cuts off its bottom edge. This
+    one holds the size limits and the ratio on the content area instead. */
+class ContentConstrainer final : public juce::ComponentBoundsConstrainer
+{
+public:
+    explicit ContentConstrainer (juce::Component& windowIn) : window (windowIn) {}
+
+    void checkBounds (juce::Rectangle<int>& bounds, const juce::Rectangle<int>& previousBounds,
+                      const juce::Rectangle<int>& limits, bool isStretchingTop, bool isStretchingLeft,
+                      bool isStretchingBottom, bool isStretchingRight) override
+    {
+        const auto frame = frameSize();
+        auto content = frame.subtractedFrom (bounds);
+        ComponentBoundsConstrainer::checkBounds (content, frame.subtractedFrom (previousBounds), frame.subtractedFrom (limits),
+                                                 isStretchingTop, isStretchingLeft, isStretchingBottom, isStretchingRight);
+        bounds = frame.addedTo (content);
+    }
+
+private:
+    juce::BorderSize<int> frameSize() const
+    {
+        if (auto* peer = window.getPeer())
+            if (const auto frame = peer->getFrameSizeIfPresent())
+                return *frame;
+
+        return {};
+    }
+
+    juce::Component& window;
+};
+
+//==============================================================================
 class AsamWindow final : public juce::DocumentWindow
 {
 public:
@@ -92,7 +125,7 @@ private:
     }
 
     juce::PropertySet* props = nullptr;
-    juce::ComponentBoundsConstrainer constrainer;
+    ContentConstrainer constrainer { *this };
 };
 
 //==============================================================================

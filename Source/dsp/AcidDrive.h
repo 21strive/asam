@@ -48,8 +48,7 @@ public:
         tone01  = toneValue;
 
         const auto d = drive;
-        const auto gainDb = -12.0f + 60.0f * std::pow (d, 1.35f);
-        const auto gain   = std::pow (10.0f, gainDb / 20.0f);
+        const auto gain = std::pow (10.0f, gainDbFor (d) / 20.0f);
 
         gain1    = std::pow (gain, 0.62f);
         gain2    = std::pow (gain, 0.38f);
@@ -73,6 +72,9 @@ public:
 
         return dcBlock.highpass (toneFilter.process (stage2)) * makeup;
     }
+
+    /** The gain into the clipping stages for a Distortion setting, in dB: -12 .. +48. */
+    static float gainDbFor (float drive) noexcept      { return -12.0f + 60.0f * std::pow (drive, 1.35f); }
 
     /** Level compensation, measured with the default pattern so the knob mostly changes
         character rather than loudness. Linear interpolation over drive. */

@@ -60,6 +60,49 @@ private:
     float g = 0.1f, r2 = 1.414f, h = 1.0f, s1 = 0.0f, s2 = 0.0f;
 };
 
+/** Trapezoidal state variable filter with all three outputs, for cutoffs that move every sample.
+    Coefficients live apart from the state so the left and right filters can share them. */
+class SvfMulti
+{
+public:
+    struct Coeffs
+    {
+        float g = 0.1f, k = 1.414f, h = 1.0f;
+    };
+
+    struct Out
+    {
+        float lp = 0.0f, bp = 0.0f, hp = 0.0f;
+    };
+
+    static Coeffs makeCoeffs (float hz, float sampleRate, float q) noexcept
+    {
+        Coeffs c;
+        c.g = std::tan (kPi * std::fmin (std::fmax (hz, 8.0f), 0.45f * sampleRate) / sampleRate);
+        c.k = 1.0f / q;
+        c.h = 1.0f / (1.0f + c.k * c.g + c.g * c.g);
+        return c;
+    }
+
+    Out process (float x, const Coeffs& c) noexcept
+    {
+        Out o;
+        o.hp = (x - (c.k + c.g) * s1 - s2) * c.h;
+        const auto v1 = c.g * o.hp;
+        o.bp = v1 + s1;
+        s1 = o.bp + v1;
+        const auto v2 = c.g * o.bp;
+        o.lp = v2 + s2;
+        s2 = o.lp + v2;
+        return o;
+    }
+
+    void reset() noexcept                  { s1 = s2 = 0.0f; }
+
+private:
+    float s1 = 0.0f, s2 = 0.0f;
+};
+
 /** Returns the per-sample coefficient of a one-pole smoother with time constant tau. */
 inline float smoothingCoef (float tauSeconds, float sampleRate) noexcept
 {

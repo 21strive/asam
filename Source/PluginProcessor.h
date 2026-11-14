@@ -33,7 +33,7 @@ public:
     bool acceptsMidi() const override                       { return true; }
     bool producesMidi() const override                      { return false; }
     bool isMidiEffect() const override                      { return false; }
-    double getTailLengthSeconds() const override            { return 0.1; }
+    double getTailLengthSeconds() const override;
 
     int getNumPrograms() override                           { return 1; }
     int getCurrentProgram() override                        { return 0; }
@@ -62,6 +62,19 @@ public:
     std::uint32_t getPatternVersion() const noexcept        { return patternVersion.load(); }
 
     //==============================================================================
+    // Sound presets: the three voices and the master volume as a .asam file (SoundPreset.h).
+    // Called from the message thread. Loading never touches the pattern, the clock or the key.
+    juce::Result loadSoundPreset (const juce::File& file);
+    juce::Result saveSoundPreset (const juce::File& file);
+    void initSound();
+
+    juce::String getSoundPresetName() const;
+    juce::File getSoundPresetFile() const;
+
+    /** True once the sound differs from the preset last loaded, saved or initialised. */
+    bool isSoundEdited() const;
+
+    //==============================================================================
     // Transport
     void setPlaying (bool shouldPlay) noexcept              { playArmed.store (shouldPlay); }
     bool isPlayArmed() const noexcept                       { return playArmed.load(); }
@@ -83,6 +96,11 @@ public:
     /** Peak since the last call, linear. */
     float takeOutputPeak() noexcept                         { return outputPeak.exchange (0.0f); }
 
+    /** Where a voice's filter is right now (envelope and accent included), and how loud the voice
+        is, 0 when silent or off: for the filter display. */
+    float getLiveCutoff (int voice) const noexcept          { return liveCutoff[(size_t) voice].load(); }
+    float getLiveLevel (int voice) const noexcept           { return liveLevel[(size_t) voice].load(); }
+
     bool isStandalone() const noexcept                      { return wrapperType == wrapperType_Standalone; }
 
     juce::AudioProcessorValueTreeState& getState() noexcept { return parameters; }
@@ -96,9 +114,11 @@ public:
     /** Interface theme, saved with the state: true is dark. */
     std::atomic<bool> darkTheme { true };
 
+    /** The editor's page, saved with the state: 0 is Sound (the voices), 1 is Pattern. */
+    std::atomic<int> editorPage { 0 };
+
 private:
     //==============================================================================
-    void renderChunk (float* out, int numSamples, int blockOffset, const juce::AudioPlayHead::PositionInfo* pos);
     void handleMidi (const juce::MidiMessage& m, bool sequencerOwnsVoice);
     void sequencerTick (double pos16);
     void triggerStep (long long absoluteStep);
@@ -107,17 +127,38 @@ private:
     int rootNote() const noexcept;
     void bumpPattern();
 
+    // Every note goes to all three voices, sounding or not, so one switched on mid-line
+    // picks up the next note in step.
+    void takeSoundSnapshot (const juce::String& name, const juce::File& file);
+
+    void voicesNoteOn (int note, bool accent) noexcept;
+    void voicesGlideTo (int note, bool accent) noexcept;
+    void voicesNoteOff() noexcept;
+
     juce::AudioProcessorValueTreeState parameters;
 
-    std::atomic<float>* pCutoff    = nullptr;
-    std::atomic<float>* pResonance = nullptr;
-    std::atomic<float>* pEnvMod    = nullptr;
-    std::atomic<float>* pDecay     = nullptr;
-    std::atomic<float>* pAccent    = nullptr;
-    std::atomic<float>* pDrive     = nullptr;
-    std::atomic<float>* pTone      = nullptr;
+    struct VoiceParamPointers
+    {
+        std::atomic<float>* cutoff = nullptr;
+        std::atomic<float>* resonance = nullptr;
+        std::atomic<float>* envMod = nullptr;
+        std::atomic<float>* decay = nullptr;
+        std::atomic<float>* release = nullptr;
+        std::atomic<float>* accent = nullptr;
+        std::atomic<float>* waveform = nullptr;
+        std::atomic<float>* unison = nullptr;
+        std::atomic<float>* detune = nullptr;
+        std::atomic<float>* width = nullptr;
+        std::atomic<float>* level = nullptr;
+        std::atomic<float>* filterMode = nullptr;
+        std::atomic<float>* enabled = nullptr;
+        std::atomic<float>* drive = nullptr;
+        std::atomic<float>* tone = nullptr;
+    };
+
+    std::array<VoiceParamPointers, asam::numVoices> voiceParams;
+
     std::atomic<float>* pVolume    = nullptr;
-    std::atomic<float>* pWaveform  = nullptr;
     std::atomic<float>* pTempo     = nullptr;
     std::atomic<float>* pSwing     = nullptr;
     std::atomic<float>* pHostSync  = nullptr;
@@ -125,15 +166,28 @@ private:
     std::atomic<float>* pOctave    = nullptr;
 
     // DSP runs oversampled so the saw, the ladder and the clipper stay clean:
-    // 4x up to 48 kHz, 2x up to 96 kHz, none above that (the voice always runs near 192 kHz).
+    // 4x up to 48 kHz, 2x up to 96 kHz, none above that (the voices always run near 192 kHz).
     static constexpr int maxChunk = 256;
     int osFactor = 4;
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampler;
-    juce::AudioBuffer<float> silence;
-    asam::dsp::AcidVoice voice;
-    asam::dsp::AcidDrive drive;
+    juce::AudioBuffer<float> silence, scratch;
+    std::array<asam::dsp::AcidVoice, asam::numVoices> voices;
 
-    juce::SmoothedValue<float> smCutoff, smResonance, smEnvMod, smDrive, smTone, smVolume;
+    // Each voice has its own distortion and tone after its filter, then its level.
+    std::array<asam::dsp::AcidDrive, asam::numVoices> drivesL, drivesR;
+
+    struct VoiceSmoothing
+    {
+        juce::SmoothedValue<float> cutoff, resonance, envMod, detune, width, level, drive, tone;
+        float onGain = 0.0f;    // fades the voice in and out when it is switched
+        float gain = 0.0f;      // level times onGain for the sample being rendered
+        bool  active = false;   // rendering: switched on, or still fading out
+    };
+
+    std::array<VoiceSmoothing, asam::numVoices> voiceSmoothing;
+    juce::SmoothedValue<float> smVolume;
+    float onGainCoef = 0.01f;
+    bool gateOpen = false;
     double baseRate = 44100.0;
 
     // Pattern, shared lock-free with the audio thread
@@ -143,6 +197,12 @@ private:
     juce::String patternName;
     int presetIndex = 0;
     bool patternEdited = false;
+
+    // The sound preset in use, and the sound as it was loaded or saved, to tell when it is edited.
+    juce::String soundPresetName { "Init" };
+    juce::File soundPresetFile;
+    juce::Array<float> soundSnapshot;                  // in soundParameterIds() order
+    std::vector<std::atomic<float>*> soundRaw;         // the same order
     juce::Random random;
 
     // Sequencer state (audio thread)
@@ -153,7 +213,6 @@ private:
     double internalPos16 = 0.0;
     long long lastAbsStep = std::numeric_limits<long long>::min();
     bool seqGateOpen = false, seqHoldThrough = false, seqGateOffPending = false;
-    float stepPhase = 0.0f;
     int transpose = 0;
 
     // Direct MIDI play when the sequencer is stopped
@@ -164,6 +223,7 @@ private:
     std::atomic<int>   viewStep { -1 }, viewBar { 0 }, viewTranspose { 0 };
     std::atomic<float> viewBpm { 130.0f };
     std::atomic<float> outputPeak { 0.0f };
+    std::array<std::atomic<float>, asam::numVoices> liveCutoff {}, liveLevel {};
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AsamProcessor)
 };
